@@ -1,5 +1,5 @@
 
-# Code for  https://blsq-giuliapuntin.shinyapps.io/SNT_Outliers_Explorer_v0_1/ 
+# Code for https://blsq-giuliapuntin.shinyapps.io/SNT_Outliers_Explorer_v0_2/ 
 
 # Shiny app code version improvement: 
 #  super LIGHT ON MEMORY, so it can handle the full country (DRC in this case) dataset
@@ -20,13 +20,11 @@
 #     (note that now the other indicators are not available as options in the app filter, 
 #     if we want to add them we need to change the code here in this script)
 # 
-# Credentials for OH database:
+# Credentials for OH database & access to multiple workspaces' DB's:
 #  * Imported from json file which is uploaded in the shinyapps.io server. 
-#  * This file is not accessible to anyone viewing the app. 
-#  * Currently connecting to DB of the "SNT development" ws, but editing the json file 
-#    (e.g., adding nodes) could allow to log in to the DB of other workspaces, hence making this 
-#    a generic app. However, how do we deal with user's permissions?
-
+#  * This file is not accessible to anyone viewing the app (so I guess creds are safe). 
+#  * Possible to access the DB of different OH workspace thanks to json file 
+#    *** HOWEVER, how do we deal with user's permissions??? ***
 
 
 # 1. LOAD LIBRARIES --------------------------------------------------------------
@@ -42,77 +40,28 @@ library(jsonlite)
 
 # 2. LOAD AND PREPARE DATA --------------------------------------------------------------------------
 
-# DB credentials from json file (not tracked by git)
-CREDENTIALS_FILE_PATH <- "./connection_params_dev.json"
+# --- Read all workspace configurations ---
 
-# Initialize database connection variables to NULL/empty
-# (these will be populated from the JSON file if it exists and is valid)
-dbname <- NULL
-host <- NULL
-port <- NULL
-username <- NULL
-password <- NULL
+CREDENTIALS_FILE_PATH <- "./connection_params.json"
+workspaces_config <- list() # Initialize as an empty list
+workspace_names <- character(0) # Initialize empty vector for names
 
-# Attempt to read credentials from the JSON file
 if (file.exists(CREDENTIALS_FILE_PATH)) {
   tryCatch({
-    creds <- fromJSON(CREDENTIALS_FILE_PATH)
-    # Access nested elements for database credentials
-    dbname <- creds$database$dbname
-    host <- creds$database$host
-    port <- creds$database$port
-    username <- creds$database$username
-    password <- creds$database$password
+    # simplifyDataFrame to FALSE for robust parsing into lists
+    config_data <- fromJSON(CREDENTIALS_FILE_PATH, simplifyDataFrame = FALSE)
+    workspaces_config <- config_data$workspaces
+    # Extract names for the UI selector
+    workspace_names <- sapply(workspaces_config, `[[`, "name")
   }, error = function(e) {
-    message(paste("Error reading credentials from", CREDENTIALS_FILE_PATH, ":", e$message))
+    message(paste("Error reading or parsing credentials from", CREDENTIALS_FILE_PATH, ":", e$message))
   })
 } else {
   message(paste("Credentials file not found at", CREDENTIALS_FILE_PATH))
 }
 
-# --- LIGHTWEIGHT INITIAL DATA FETCH ---
-# Instead of loading all data, only load what's needed for the initial UI controls.
-# The main data will be loaded reactively in the server section.
-
-# Initialize choices as empty (to handle connection errors)
-adm1_choices <- data.frame(ADM1_ID = character(0), ADM1_NAME = character(0))
-outlier_method_choices <- character(0)
-
-# Establish connection & read initial data
-con <- NULL # Initialize connection to NULL
-tryCatch({
-  con <- DBI::dbConnect(RPostgres::Postgres(),
-                        dbname = dbname,
-                        host = host,
-                        port = port,
-                        user = username,
-                        password = password,
-                        sslmode = 'require')
-  
-  if (is.null(con) || !inherits(con, "PqConnection")) {
-    stop("Failed to establish a valid PostgreSQL connection.")
-  }
-  
-  # Query 1: Get only the ADM1 choices to populate the first filter. This is a small, fast query.
-  adm1_query <- "SELECT DISTINCT \"ADM1_NAME\", \"ADM1_ID\" FROM flagged_outliers_allmethods_name_date ORDER BY \"ADM1_NAME\""
-  adm1_choices <- DBI::dbGetQuery(con, adm1_query)
-  
-  # Query 2: Get column names to find outlier methods without loading any data rows (LIMIT 0).
-  column_query <- "SELECT * FROM flagged_outliers_allmethods_name_date LIMIT 0"
-  column_names <- colnames(DBI::dbGetQuery(con, column_query))
-  outlier_method_choices <- column_names[startsWith(column_names, "OUTLIER_")]
-  
-  
-}, error = function(e) {
-  message("Error connecting to database or reading initial data: ", e$message)
-}, finally = {
-  # Disconnect from the database
-  if (!is.null(con) && inherits(con, "PqConnection")) {
-    DBI::dbDisconnect(con)
-    message("Initial database connection closed.")
-  }
-})
-
+# The app now starts with NO data loaded. 
+# Data loading is fully reactive (user must first select a workspace from the drop-down list).
 
 
 # 3. UI (with Tabs) ----------------------------------------------------
@@ -120,8 +69,9 @@ tryCatch({
 ui <- fluidPage(
   titlePanel("SNT Outliers Explorer"),
   
-  if (nrow(adm1_choices) == 0) {
-    h3(glue("Error: Could not load initial data from the database. Please check connection details and table existence."))
+  # Check if any workspace configurations were loaded.
+  if (length(workspace_names) == 0) {
+    h3(glue("Error: Could not load any workspace configurations. Please check the '{CREDENTIALS_FILE_PATH}' file."))
   } else {
     sidebarLayout(
       sidebarPanel(
@@ -129,10 +79,16 @@ ui <- fluidPage(
         h4("Global Filters"),
         p("Filters apply across all tabs!"),
         hr(),
-        selectInput(inputId = "method", label = "1. Select Outlier Detection Method",
-                    choices = outlier_method_choices, selected = outlier_method_choices[4]),
-        selectInput(inputId = "adm1", label = "2. Select ADM 1",
-                    choices = setNames(adm1_choices$ADM1_ID, adm1_choices$ADM1_NAME)),
+        
+        # --- Workspace Selector ---
+        # The user must select a workspace first!
+        selectInput(inputId = "workspace", label = "1. Select Workspace",
+                    choices = c("Select a workspace" = "", workspace_names),
+                    selected = ""), # Nothing selected initially
+        
+        # these UI elements are rendered dynamically based on (after) workspace selection
+        uiOutput("method_ui"),
+        uiOutput("adm1_ui"),
         uiOutput("adm2_ui"),
         uiOutput("indicator_ui"),
         uiOutput("ou_names_ui")
@@ -140,15 +96,17 @@ ui <- fluidPage(
       
       mainPanel(
         width = 9,
-        tabsetPanel(
-          id = "main_tabs",
-          tabPanel(
-            "Summary View",
-            uiOutput("summary_plot_ui")
-          ),
-          tabPanel(
-            "Time Series View",
-            uiOutput("outlier_plot_ui")
+        # conditionalPanel: show a message until a workspace is selected
+        conditionalPanel(
+          condition = "input.workspace == ''",
+          h4("Please select a workspace to begin.")
+        ),
+        conditionalPanel(
+          condition = "input.workspace != ''",
+          tabsetPanel(
+            id = "main_tabs",
+            tabPanel("Summary View", uiOutput("summary_plot_ui")),
+            tabPanel("Time Series View", uiOutput("outlier_plot_ui"))
           )
         )
       )
@@ -162,144 +120,155 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
   
-  # --- REACTIVE DATA LOADING ---
-  # This eventReactive block triggers ONLY when input$adm1 changes!
-  # It connects to the DB, fetches data for the selected ADM1, and disconnects (cool ay?)
-  data_reactive <- eventReactive(input$adm1, {
-    req(input$adm1) # Ensure an ADM1 is selected.
+  # get the connection details for the selected workspace
+  selected_credentials <- reactive({
+    req(input$workspace)
+    # Find the list element that matches the selected workspace name
+    selected_ws <- Filter(function(ws) ws$name == input$workspace, workspaces_config)
+    # Ensure a unique match was found
+    if (length(selected_ws) != 1) return(NULL)
+    # Return the credentials list, which is now guaranteed to be a list object
+    return(selected_ws[[1]]$credentials)
+  })
+  
+  # --- Reactive Initial Choices ---
+  # connect to the selected DB to get the first-level filter choices 
+  initial_choices <- eventReactive(input$workspace, {
+    req(input$workspace) # Require a workspace to be selected before running.
+    creds <- selected_credentials()
+    req(creds) # Stop if credentials weren't found
     
-    # Show a notification to the user that data is loading.
-    id <- showNotification("Fetching data from database...", duration = NULL, closeButton = FALSE)
+    id <- showNotification("Fetching initial choices from database...", duration = NULL, closeButton = FALSE)
     on.exit(removeNotification(id), add = TRUE)
     
-    con_reactive <- NULL
-    data_for_adm1 <- data.frame()
+    con <- NULL
+    choices <- list()
     
     tryCatch({
-      con_reactive <- DBI::dbConnect(RPostgres::Postgres(),
-                                     dbname = dbname, host = host, port = port,
-                                     user = username, password = password, sslmode = 'require')
+      # `creds` is guaranteed to be a named list
+      con <- DBI::dbConnect(RPostgres::Postgres(),
+                            dbname = creds$dbname, host = creds$host, port = creds$port,
+                            user = creds$username, password = creds$password, sslmode = 'require')
       
-      if (is.null(con_reactive) || !inherits(con_reactive, "PqConnection")) {
-        stop("Failed to establish a valid PostgreSQL connection.")
-      }
+      adm1_query <- "SELECT DISTINCT \"ADM1_NAME\", \"ADM1_ID\" FROM flagged_outliers_allmethods_name_date ORDER BY \"ADM1_NAME\""
+      choices$adm1 <- DBI::dbGetQuery(con, adm1_query)
       
-      # Highly specific query: fetch only the data for selected ADM1
+      column_query <- "SELECT * FROM flagged_outliers_allmethods_name_date LIMIT 0"
+      column_names <- colnames(DBI::dbGetQuery(con, column_query))
+      choices$methods <- column_names[startsWith(column_names, "OUTLIER_")]
+      
+      return(choices)
+    }, error = function(e) {
+      message("Error fetching initial choices: ", e)
+      return(list(error = as.character(e)))
+    }, finally = {
+      if (!is.null(con)) DBI::dbDisconnect(con)
+    })
+  })
+  
+  # --- DYNAMIC UI RENDERED FROM initial_choices() ---
+  output$method_ui <- renderUI({
+    choices_obj <- initial_choices()
+    req(choices_obj)
+    if (!is.null(choices_obj$error)) {
+      return(p(style="color:red;", "DB Error: ", choices_obj$error))
+    }
+    selectInput(inputId = "method", label = "2. Select Outlier Detection Method",
+                choices = choices_obj$methods, selected = choices_obj$methods[4])
+  })
+  
+  output$adm1_ui <- renderUI({
+    choices_obj <- initial_choices()
+    req(choices_obj)
+    # Don't render if there was an error or no ADM1 choices were found
+    if (!is.null(choices_obj$error) || length(choices_obj$adm1) == 0) return()
+    
+    adm1_ch <- choices_obj$adm1
+    selectInput(inputId = "adm1", label = "3. Select ADM 1",
+                choices = setNames(adm1_ch$ADM1_ID, adm1_ch$ADM1_NAME))
+  })
+  
+  data_reactive <- reactive({
+    req(input$adm1)
+    creds <- selected_credentials()
+    req(creds) # Stop if credentials aren't valid
+    
+    id <- showNotification("Fetching data for ADM1...", duration = NULL, closeButton = FALSE)
+    on.exit(removeNotification(id), add = TRUE)
+    
+    con <- NULL
+    tryCatch({
+      con <- DBI::dbConnect(RPostgres::Postgres(),
+                            dbname = creds$dbname, host = creds$host, port = creds$port,
+                            user = creds$username, password = creds$password, sslmode = 'require')
+      
       sql_query <- glue("SELECT * FROM flagged_outliers_allmethods_name_date WHERE \"INDICATOR\" IN ('CONF', 'SUSP', 'TEST', 'PRES') AND \"ADM1_ID\" = '{input$adm1}'")
-      data_for_adm1 <- DBI::dbGetQuery(con_reactive, statement = sql_query)
+      data_for_adm1 <- DBI::dbGetQuery(con, statement = sql_query)
       
-      # Ensure DATE col is in Date format - unnecessary but yeah ...
       if ("DATE" %in% colnames(data_for_adm1)) {
         data_for_adm1$DATE <- as.Date(data_for_adm1$DATE)
       }
       return(data_for_adm1)
-      
     }, error = function(e) {
-      message("Error fetching data for ADM1: ", e$message)
+      message("Error fetching data for ADM1: ", e)
+      showNotification(paste("Data fetch error:", as.character(e)), type = "error", duration = 10)
       return(data.frame())
     }, finally = {
-      if (!is.null(con_reactive) && inherits(con_reactive, "PqConnection")) {
-        DBI::dbDisconnect(con_reactive)
-        message(glue("Database connection for ADM1 '{input$adm1}' closed."))
-      }
+      if (!is.null(con)) DBI::dbDisconnect(con)
     })
   })
   
-  
-  # --- DYNAMIC UI (driven by data_reactive) ---
+  # The rest of the server logic: driven by the reactives above
   adm2_choices_reactive <- reactive({
     req(data_reactive())
-    data_reactive() %>%
-      distinct(ADM2_NAME, ADM2_ID) %>%
-      arrange(ADM2_NAME)
+    data_reactive() %>% distinct(ADM2_NAME, ADM2_ID) %>% arrange(ADM2_NAME)
   })
   
   output$adm2_ui <- renderUI({
-    # This UI element will only appear after loading data for an ADM1 
     req(nrow(data_reactive()) > 0)
     choices <- adm2_choices_reactive()
-    selectInput(inputId = "adm2", label = "3. Select ADM 2",
+    selectInput(inputId = "adm2", label = "4. Select ADM 2",
                 choices = setNames(choices$ADM2_ID, choices$ADM2_NAME))
   })
   
   indicator_choices_reactive <- reactive({
     req(data_reactive(), input$adm2)
-    data_reactive() %>%
-      filter(ADM2_ID == input$adm2) %>%
-      distinct(INDICATOR) %>%
-      arrange(INDICATOR) %>%
-      pull(INDICATOR)
+    data_reactive() %>% filter(ADM2_ID == input$adm2) %>% distinct(INDICATOR) %>% arrange(INDICATOR) %>% pull(INDICATOR)
   })
   
   output$indicator_ui <- renderUI({
     req(nrow(data_reactive()) > 0)
-    choices <- indicator_choices_reactive()
-    selectizeInput(
-      inputId = "indicators",
-      label = "4. Select/Deselect Indicators",
-      choices = choices,
-      selected = choices,
-      multiple = TRUE
-    )
+    selectizeInput(inputId = "indicators", label = "5. Select/Deselect Indicators",
+                   choices = indicator_choices_reactive(), selected = indicator_choices_reactive(), multiple = TRUE)
   })
   
   ou_name_choices_reactive <- reactive({
     req(data_reactive(), input$adm2)
-    data_reactive() %>%
-      filter(ADM2_ID == input$adm2) %>%
-      distinct(OU_NAME) %>%
-      arrange(OU_NAME) %>%
-      pull(OU_NAME)
+    data_reactive() %>% filter(ADM2_ID == input$adm2) %>% distinct(OU_NAME) %>% arrange(OU_NAME) %>% pull(OU_NAME)
   })
   
   output$ou_names_ui <- renderUI({
     req(nrow(data_reactive()) > 0)
-    choices <- ou_name_choices_reactive()
-    selectizeInput(
-      inputId = "ou_names",
-      label = "5. Select/Deselect Facilities",
-      choices = choices,
-      selected = choices,
-      multiple = TRUE
-    )
+    selectizeInput(inputId = "ou_names", label = "6. Select/Deselect Facilities",
+                   choices = ou_name_choices_reactive(), selected = ou_name_choices_reactive(), multiple = TRUE)
   })
   
-  # REACTIVE DATA FILTERING (uses data_reactive as source)
   filtered_data <- reactive({
     req(data_reactive(), input$method, input$adm2, input$indicators, input$ou_names)
-    
     small_wide_data <- data_reactive() %>%
-      filter(
-        ADM2_ID == input$adm2,
-        INDICATOR %in% input$indicators,
-        OU_NAME %in% input$ou_names
-      )
-    
+      filter(ADM2_ID == input$adm2, INDICATOR %in% input$indicators, OU_NAME %in% input$ou_names)
     small_long_data <- small_wide_data %>%
-      pivot_longer(
-        starts_with("OUTLIER_"),
-        names_to = "OUTLIER_METHOD",
-        values_to = "OUTLIER"
-      )
-    
-    final_data <- small_long_data %>%
-      filter(OUTLIER_METHOD == input$method)
-    
-    return(final_data)
+      pivot_longer(starts_with("OUTLIER_"), names_to = "OUTLIER_METHOD", values_to = "OUTLIER")
+    small_long_data %>% filter(OUTLIER_METHOD == input$method)
   })
-  
-  # --- DYNAMIC HEIGHT CALCULATION ---
-  HEIGHT_PER_ROW <- 100
   
   total_height_reactive <- reactive({
     req(input$ou_names)
     n_ous <- length(input$ou_names)
     n_rows <- if (n_ous > 0) ceiling(n_ous / 3) else 1
-    base_height <- 150
-    max(500, base_height + n_rows * HEIGHT_PER_ROW)
+    max(500, 150 + n_rows * 100)
   })
   
-  # --- DYNAMIC UI RENDERING ---
   output$summary_plot_ui <- renderUI({
     req(filtered_data())
     plotOutput("summary_plot", height = paste0(total_height_reactive(), "px"))
@@ -310,72 +279,41 @@ server <- function(input, output, session) {
     plotOutput("outlier_plot", height = paste0(total_height_reactive(), "px"))
   })
   
-  # --- PLOT 1: PROPORTIONAL BAR CHARTS (TAB 1) ---
   output$summary_plot <- renderPlot({
-    plot_data <- filtered_data()
-    req(nrow(plot_data) > 0)
-    summary_data <- plot_data %>%
-      count(OU_NAME, INDICATOR, OUTLIER) %>%
-      group_by(OU_NAME, INDICATOR) %>%
-      mutate(proportion = n / sum(n)) %>%
-      ungroup() %>%
+    plot_data <- filtered_data(); req(nrow(plot_data) > 0)
+    summary_data <- plot_data %>% count(OU_NAME, INDICATOR, OUTLIER) %>% group_by(OU_NAME, INDICATOR) %>%
+      mutate(proportion = n / sum(n)) %>% ungroup() %>%
       mutate(Status = ifelse(OUTLIER, "Outlier", "Not an Outlier"),
-             label_text = if_else(
-               OUTLIER == TRUE & proportion > 0,
-               scales::percent(proportion, accuracy = 1),
-               NA_character_
-             )
-      )
-    adm1_name <- adm1_choices %>% filter(ADM1_ID == input$adm1) %>% pull(ADM1_NAME) %>% first()
+             label_text = if_else(OUTLIER == TRUE & proportion > 0, scales::percent(proportion, accuracy = 1), NA_character_))
+    adm1_ch <- initial_choices()$adm1
+    adm1_name <- adm1_ch %>% filter(ADM1_ID == input$adm1) %>% pull(ADM1_NAME) %>% first()
     adm2_name <- data_reactive() %>% filter(ADM2_ID == input$adm2) %>% pull(ADM2_NAME) %>% first()
-    main_title <- glue("Proportion of Outliers by Indicator")
-    sub_title <- glue("Displaying Facilities (OU_NAME) within ADM2: {adm2_name} (ADM1: {adm1_name})")
+    main_title <- glue("Proportion of Outliers by Indicator"); sub_title <- glue("Displaying Facilities (OU_NAME) within ADM2: {adm2_name} (ADM1: {adm1_name})")
     ggplot(summary_data, aes(x = proportion, y = INDICATOR, fill = Status)) +
-      geom_col(color = "#333333", linewidth = 0.1) +
-      geom_vline(xintercept = c(0.25, 0.5, 0.75), color = "white") +
-      geom_text(
-        aes(label = label_text),
-        hjust = -0.1, color = "#6A1B9A", size = 3.5, fontface = "bold"
-      ) +
-      facet_wrap(~ OU_NAME, ncol = 3) +
-      scale_x_continuous(labels = scales::percent_format(), expand = expansion(mult = c(0, .1))) +
+      geom_col(color = "#333333", linewidth = 0.1) + geom_vline(xintercept = c(0.25, 0.5, 0.75), color = "white") +
+      geom_text(aes(label = label_text), hjust = -0.1, color = "#6A1B9A", size = 3.5, fontface = "bold") +
+      facet_wrap(~ OU_NAME, ncol = 3) + scale_x_continuous(labels = scales::percent_format(), expand = expansion(mult = c(0, .1))) +
       scale_fill_manual(values = c("Outlier" = "#6A1B9A", "Not an Outlier" = "#F5F5F5"), na.value = "yellow") +
       labs(title = main_title, subtitle = sub_title, x = NULL, y = NULL, fill = NULL) +
-      theme(
-        legend.position = "top",
-        strip.background = element_rect(fill = NA),
-        strip.text = element_text(face = "bold", color = "#333333"),
-        panel.grid.y = element_blank(),
-        axis.ticks = element_blank(),
-        panel.background = element_blank()
-      )
+      theme(legend.position = "top", strip.background = element_rect(fill = NA), strip.text = element_text(face = "bold", color = "#333333"),
+            panel.grid.y = element_blank(), axis.ticks = element_blank(), panel.background = element_blank())
   }, res = 96)
   
-  
-  # --- PLOT 2: TIME SERIES (TAB 2) ---
   output$outlier_plot <- renderPlot({
-    plot_data <- filtered_data()
-    req(nrow(plot_data) > 0)
-    adm1_name <- adm1_choices %>% filter(ADM1_ID == input$adm1) %>% pull(ADM1_NAME) %>% first()
+    plot_data <- filtered_data(); req(nrow(plot_data) > 0)
+    adm1_ch <- initial_choices()$adm1
+    adm1_name <- adm1_ch %>% filter(ADM1_ID == input$adm1) %>% pull(ADM1_NAME) %>% first()
     adm2_name <- data_reactive() %>% filter(ADM2_ID == input$adm2) %>% pull(ADM2_NAME) %>% first()
-    main_title <- glue("Outlier Method: {input$method}")
-    sub_title <- glue("Displaying Facilities (OU_NAME) within ADM2: {adm2_name} (ADM1: {adm1_name})")
+    main_title <- glue("Outlier Method: {input$method}"); sub_title <- glue("Displaying Facilities (OU_NAME) within ADM2: {adm2_name} (ADM1: {adm1_name})")
     ggplot(plot_data, aes(x = DATE, y = VALUE, color = INDICATOR, group = INDICATOR)) +
-      geom_line() +
-      geom_point(data = . %>% filter(OUTLIER), shape = 1, size = 4, stroke = 1.2) +
-      facet_wrap(~ OU_NAME, ncol = 3, scales = "free_y") +
-      scale_color_viridis_d() +
+      geom_line() + geom_point(data = . %>% filter(OUTLIER), shape = 1, size = 4, stroke = 1.2) +
+      facet_wrap(~ OU_NAME, ncol = 3, scales = "free_y") + scale_color_viridis_d() +
       labs(title = main_title, subtitle = sub_title, x = NULL, y = NULL, color = "INDICATOR: ") +
-      theme(
-        legend.position = "top",
-        strip.background = element_rect(fill = NA),
-        strip.text = element_text(face = "bold", color = "#333333"),
-        panel.grid.y = element_blank(),
-        axis.ticks = element_blank(),
-        panel.background = element_rect(fill = "#F5F5F5")
-      )
+      theme(legend.position = "top", strip.background = element_rect(fill = NA), strip.text = element_text(face = "bold", color = "#333333"),
+            panel.grid.y = element_blank(), axis.ticks = element_blank(), panel.background = element_rect(fill = "#F5F5F5"))
   }, res = 96)
 }
+
 
 # 5. RUN THE APP --------------------------------------------------------------------------------
 
