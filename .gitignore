@@ -1,0 +1,103 @@
+# History files
+.Rhistory
+.Rapp.history
+
+# Session Data files
+.RData
+
+# ShinyApps manifest
+*.dcf
+.dcf
+
+# Fonts
+*.ttc
+
+# DS Store
+.DS_Store
+
+# Log Files
+logfile*.txt
+
+# Packrat lockfiles generated during RSC deploy
+packrat.lock
+
+169-prerender-a/index.html
+
+# User-specific files
+.Ruserdata
+
+# Example code in package build process
+*-Ex.R
+.Rproj.user
+
+# Output files from R CMD build
+/*.tar.gz
+
+# Output files from R CMD check
+/*.Rcheck/
+
+# RStudio files
+.Rproj.user/
+
+# produced vignettes
+vignettes/*.html
+vignettes/*.pdf
+
+# OAuth2 token, see https://github.com/hadley/httr/releases/tag/v0.3
+.httr-oauth
+
+# knitr and R markdown default cache directories
+*_cache/
+/cache/
+
+# Temporary files created by R markdown
+*.utf8.md
+*.knit.md
+
+# R Environment Variables
+.Renviron
+
+
+
+# For this repo specifically ------------------------------------------------------------------------------------------
+
+# Ignore all "old" folders (where I drop old versions of plots or scripts)
+# ** = any number of directories
+# final / = ignore entire directory (without it will ignore files and folders with that name)
+**/old/
+**/ignore/
+**/test/
+**/to_find_better_place/
+
+**/test_stuff*
+**/[Tt]est*
+
+# Do NOT ignore folder in/ and its subdirectories
+!in/
+
+# Ignore figures ...
+*.jpeg
+*.png
+
+# Ignore all PDF files anywhere in the repository
+*.pdf
+*.PDF
+
+# Ignore all .rds and .RDS files
+*.rds
+*.RDS
+# except any R script 
+!*.R
+
+# Ignore all .qmd files...
+*.qmd
+
+# Ignore all .csv files...
+*.csv
+*.CSV
+
+*.parquet
+
+# Ignore credentials file
+**/connection_params.json
+**/connection_params_*.json

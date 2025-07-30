@@ -1,0 +1,34 @@
+{
+  "workspaces": [
+    {
+      "name": "SNT Project - Country A",
+      "credentials": {
+        "dbname": "db_country_a",
+        "host": "host_a.db.server.com",
+        "port": 5432,
+        "username": "user_a",
+        "password": "password_for_a"
+      }
+    },
+    {
+      "name": "SNT Project - Country B",
+      "credentials": {
+        "dbname": "db_country_b",
+        "host": "host_b.db.server.com",
+        "port": 5432,
+        "username": "user_b",
+        "password": "password_for_b"
+      }
+    },
+    {
+      "name": "SNT development",
+      "credentials": {
+        "dbname": "db_dev",
+        "host": "dev.db.server.com",
+        "port": 5432,
+        "username": "user_dev",
+        "password": "password_for_dev"
+      }
+    }
+  ]
+}
